@@ -1,4 +1,4 @@
-/*
+﻿/*Neuer Code18.06.26
  * ============================================================
  *  ESP32 → AWS IoT Core  |  Arduino IDE
  *  Region:  eu-central-1
@@ -29,6 +29,7 @@
 #include <ArduinoJson.h>
 #include <HX711.h>
 #include <Preferences.h>
+#include <HTTPClient.h>
 
 // ─── WLAN ──────────────────────────────────────────────────
 const char* WIFI_SSID     = "iPhone Sebastian";
@@ -154,7 +155,7 @@ bmwsDhiKfsmLXomX00p2E6Qrq/5FhAXwMuYgaAoyoZs9sQmdyCl/
 
 // ─── Forward Declarations ──────────────────────────────────
 void publishTestMessage(const char* statusText);
-void publishBarcode(const String& barcode);
+void lookupAndPublish(const String& ean);
 
 // ─── Globale Objekte ───────────────────────────────────────
 WiFiClientSecure  wifiSecure;
@@ -249,19 +250,91 @@ void publishTestMessage(const char* statusText) {
 }
 
 
-// ─── Barcode via MQTT senden ───────────────────────────────
-void publishBarcode(const String& barcode) {
-  StaticJsonDocument<256> doc;
-  doc["device"]    = CLIENT_ID;
-  doc["barcode"]   = barcode;
-  doc["uptime_s"]  = millis() / 1000;
+// ─── EAN → OpenFoodFacts API → MQTT ───────────────────────
+void lookupAndPublish(const String& ean) {
+  Serial.print("[API] EAN: ");
+  Serial.print(ean);
+  Serial.print("  Freier Heap: ");
+  Serial.println(ESP.getFreeHeap());
 
-  char jsonBuffer[256];
-  serializeJson(doc, jsonBuffer);
+  WiFiClientSecure httpSecure;
+  httpSecure.setInsecure();
+
+  HTTPClient http;
+  // ?fields= begrenzt die Antwort auf ~500 Bytes statt 100+ KB
+  String url = "https://world.openfoodfacts.org/api/v0/product/" + ean
+             + ".json?fields=status,product_name,brands,categories";
+  http.begin(httpSecure, url);
+  http.setTimeout(15000);
+  http.addHeader("User-Agent", "ESP32-IoT-Scanner/1.0");
+
+  int code = http.GET();
+  Serial.print("[API] HTTP Code: ");
+  Serial.println(code);
+
+  if (code != HTTP_CODE_OK) {
+    Serial.print("[API] Fehler: ");
+    Serial.println(http.errorToString(code));
+    http.end();
+    return;
+  }
+
+  String raw = http.getString();
+  http.end();
+  Serial.print("[API] Antwort: ");
+  Serial.println(raw);
+
+  StaticJsonDocument<1024> doc;
+  DeserializationError err = deserializeJson(doc, raw);
+
+  if (err) {
+    Serial.print("[API] JSON Fehler: ");
+    Serial.println(err.c_str());
+    return;
+  }
+
+  Serial.print("[API] Status: ");
+  Serial.println(doc["status"].as<int>());
+
+  if (doc["status"].as<int>() != 1) {
+    Serial.println("[API] Produkt nicht gefunden – kein Publish");
+    return;
+  }
+
+  String name       = doc["product"]["product_name"] | "unbekannt";
+  String brands     = doc["product"]["brands"]       | "unbekannt";
+  String categories = doc["product"]["categories"]   | "unbekannt";
+  if (categories.length() > 120) categories = categories.substring(0, 120);
+
+  Serial.print("[API] Name:   "); Serial.println(name);
+  Serial.print("[API] Marke:  "); Serial.println(brands);
+  Serial.print("[API] Kateg.: "); Serial.println(categories);
+
+  if (!mqttClient.connected()) {
+    Serial.println("[MQTT] Nicht verbunden – Publish abgebrochen");
+    return;
+  }
+
+  float gewicht = waage.is_ready() ? waage.get_units(5) : 0.0;
+
+  // Einzige MQTT-Nachricht mit allen Daten
+  StaticJsonDocument<768> mqtt_doc;
+  mqtt_doc["device"]       = CLIENT_ID;
+  mqtt_doc["ean"]          = ean;
+  mqtt_doc["product_name"] = name;
+  mqtt_doc["brands"]       = brands;
+  mqtt_doc["categories"]   = categories;
+  mqtt_doc["gewicht_g"]    = gewicht;
+  mqtt_doc["uptime_s"]     = millis() / 1000;
+
+  char jsonBuffer[768];
+  serializeJson(mqtt_doc, jsonBuffer);
 
   bool ok = mqttClient.publish(TOPIC_PUB, jsonBuffer);
-  Serial.print("[MQTT] Barcode gesendet: ");
+  Serial.print("[MQTT] Produkt gesendet: ");
   Serial.println(ok ? "OK ✓" : "FEHLER ✗");
+  Serial.print("[MQTT] Payload: ");
+  Serial.println(jsonBuffer);
 }
 
 
@@ -283,7 +356,7 @@ void setup() {
   mqttClient.setSocketTimeout(60);   // ← FIX: Socket-Timeout auf 60s erhöht
   mqttClient.setServer(AWS_ENDPOINT, MQTT_PORT);
   mqttClient.setCallback(mqttCallback);
-  mqttClient.setBufferSize(512);
+  mqttClient.setBufferSize(1024);
 
   // Barcode-Scanner initialisieren
   ScannerSerial.begin(SCANNER_BAUD, SERIAL_8N1, SCANNER_RX_PIN, SCANNER_TX_PIN);
@@ -357,20 +430,12 @@ void loop() {
     }
   }
 
-  // Barcode-Scanner auslesen (Debug: jedes Byte sofort ausgeben)
+  // ─── Barcode-Scanner auslesen ────────────────────────────
   while (ScannerSerial.available()) {
     char c = (char)ScannerSerial.read();
-    Serial.print("[DEBUG] Byte empfangen: 0x");
-    Serial.print((uint8_t)c, HEX);
-    Serial.print(" '");
-    if (c >= 32) Serial.print(c);
-    Serial.println("'");
-
     if (c == '\r' || c == '\n') {
       if (scanBuffer.length() > 0) {
-        Serial.print("[Scanner] Barcode: ");
-        Serial.println(scanBuffer);
-        publishBarcode(scanBuffer);
+        lookupAndPublish(scanBuffer);
         scanBuffer = "";
       }
     } else {
