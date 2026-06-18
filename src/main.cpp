@@ -27,6 +27,8 @@
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
+#include <HX711.h>
+#include <Preferences.h>
 
 // ─── WLAN ──────────────────────────────────────────────────
 const char* WIFI_SSID     = "iPhone Sebastian";
@@ -45,6 +47,25 @@ const int   MQTT_PORT     = 8883;
 
 // ─── Intervall für Testnachrichten (Millisekunden) ─────────
 const long  PUBLISH_INTERVAL = 5000;   // alle 5 Sekunden
+
+// ─── Barcode-Scanner (UART) ────────────────────────────────
+#define SCANNER_RX_PIN  16    // ESP32 GPIO16 ← Scanner TX
+#define SCANNER_TX_PIN  17    // ESP32 GPIO17 → Scanner RX
+#define SCANNER_BAUD    9600
+HardwareSerial ScannerSerial(2);  // UART2
+
+// ─── Drucktaster DS427 ─────────────────────────────────────
+//  Verschaltung: Taster-Pin → GPIO, anderer Taster-Pin → GND
+//  INPUT_PULLUP: LOW = gedrückt, HIGH = offen
+const int   TASTER_PINS[4]    = {25, 26, 27, 32};
+const char* TASTER_NAMEN[4]   = {"T1(G25)", "T2(G26)", "T3(G27)", "T4(G32)"};
+
+// ─── Wägezellen / HX711 ────────────────────────────────────
+const int   HX711_DT_PIN      = 18;   // DOUT → GPIO18
+const int   HX711_SCK_PIN     = 19;   // SCK  → GPIO19
+float       kalibrierung      = -7050.0;  // Wird aus NVS geladen, falls vorhanden
+HX711       waage;
+Preferences prefs;
 
 
 // ===========================================================
@@ -133,13 +154,17 @@ bmwsDhiKfsmLXomX00p2E6Qrq/5FhAXwMuYgaAoyoZs9sQmdyCl/
 
 // ─── Forward Declarations ──────────────────────────────────
 void publishTestMessage(const char* statusText);
+void publishBarcode(const String& barcode);
 
 // ─── Globale Objekte ───────────────────────────────────────
 WiFiClientSecure  wifiSecure;
 PubSubClient      mqttClient(wifiSecure);
 
-unsigned long lastPublishMs = 0;
-int           messageCount  = 0;
+unsigned long lastPublishMs  = 0;
+unsigned long lastSensorMs   = 0;
+int           messageCount   = 0;
+String        scanBuffer     = "";
+const long    SENSOR_INTERVAL = 2000;
 
 
 // ─── WLAN verbinden ────────────────────────────────────────
@@ -200,14 +225,18 @@ void connectMQTT() {
 void publishTestMessage(const char* statusText) {
   messageCount++;
 
-  StaticJsonDocument<256> doc;
+  StaticJsonDocument<512> doc;
   doc["device"]    = CLIENT_ID;
   doc["status"]    = statusText;
   doc["messageNr"] = messageCount;
   doc["uptime_s"]  = millis() / 1000;
   doc["rssi_dBm"]  = WiFi.RSSI();
 
-  char jsonBuffer[256];
+  if (waage.is_ready()) {
+    doc["gewicht_g"] = waage.get_units(3);
+  }
+
+  char jsonBuffer[512];
   serializeJson(doc, jsonBuffer);
 
   bool ok = mqttClient.publish(TOPIC_PUB, jsonBuffer);
@@ -217,6 +246,22 @@ void publishTestMessage(const char* statusText) {
   Serial.println(ok ? "OK ✓" : "FEHLER ✗");
   Serial.print("[MQTT] Payload: ");
   Serial.println(jsonBuffer);
+}
+
+
+// ─── Barcode via MQTT senden ───────────────────────────────
+void publishBarcode(const String& barcode) {
+  StaticJsonDocument<256> doc;
+  doc["device"]    = CLIENT_ID;
+  doc["barcode"]   = barcode;
+  doc["uptime_s"]  = millis() / 1000;
+
+  char jsonBuffer[256];
+  serializeJson(doc, jsonBuffer);
+
+  bool ok = mqttClient.publish(TOPIC_PUB, jsonBuffer);
+  Serial.print("[MQTT] Barcode gesendet: ");
+  Serial.println(ok ? "OK ✓" : "FEHLER ✗");
 }
 
 
@@ -240,6 +285,38 @@ void setup() {
   mqttClient.setCallback(mqttCallback);
   mqttClient.setBufferSize(512);
 
+  // Barcode-Scanner initialisieren
+  ScannerSerial.begin(SCANNER_BAUD, SERIAL_8N1, SCANNER_RX_PIN, SCANNER_TX_PIN);
+  Serial.println("[Scanner] Bereit auf GPIO RX=16, TX=17 @ 9600 Baud");
+
+  // Taster initialisieren (INPUT_PULLUP: kein externer Widerstand nötig)
+  for (int i = 0; i < 4; i++) {
+    pinMode(TASTER_PINS[i], INPUT_PULLUP);
+  }
+  Serial.println("[Taster]  Bereit auf GPIO 25, 26, 27, 32");
+
+  // Kalibrierfaktor aus NVS laden (überlebt Flashen)
+  prefs.begin("waage", true);
+  if (prefs.isKey("kalib")) {
+    kalibrierung = prefs.getFloat("kalib", -7050.0);
+    Serial.print("[Waage]   Kalibrierfaktor aus Speicher geladen: ");
+    Serial.println(kalibrierung);
+  } else {
+    Serial.println("[Waage]   Kein Kalibrierfaktor gespeichert – bitte 'k' senden!");
+  }
+  prefs.end();
+
+  // HX711 initialisieren
+  waage.begin(HX711_DT_PIN, HX711_SCK_PIN);
+  if (waage.is_ready()) {
+    waage.set_scale(kalibrierung);
+    waage.tare();
+    Serial.println("[Waage]   Bereit auf GPIO DT=18, SCK=19 – Nullpunkt gesetzt");
+    Serial.println("[Waage]   Sende jederzeit 'k' fuer Neukalibrierung");
+  } else {
+    Serial.println("[Waage]   HX711 nicht gefunden – Verkabelung pruefen!");
+  }
+
   // Verbinden
   connectWifi();
   connectMQTT();
@@ -255,7 +332,82 @@ void loop() {
   }
   mqttClient.loop();
 
+  // ─── Kalibrierung jederzeit per 'k' auslösbar ─────────────
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+    if (c == 'k' || c == 'K') {
+      Serial.println("[Waage]   Kalibrierung gestartet – Waage leer lassen...");
+      delay(2000);
+      waage.tare();
+      Serial.println("[Waage]   Nullpunkt gesetzt. Bekanntes Gewicht auflegen.");
+      Serial.println("[Waage]   Dann Gramm-Wert eingeben (z.B. 1000) + ENTER:");
+      while (!Serial.available()) { delay(100); }
+      float bekannt = Serial.parseFloat();
+      Serial.flush();
+      float rohwert = waage.get_value(10);
+      kalibrierung  = rohwert / bekannt;
+      waage.set_scale(kalibrierung);
+      prefs.begin("waage", false);
+      prefs.putFloat("kalib", kalibrierung);
+      prefs.end();
+      Serial.print("[Waage]   Kalibrierfaktor gespeichert: ");
+      Serial.println(kalibrierung);
+      Serial.println("[Waage]   Kalibrierung abgeschlossen – bleibt nach Neustart erhalten!");
+      break;
+    }
+  }
+
+  // Barcode-Scanner auslesen (Debug: jedes Byte sofort ausgeben)
+  while (ScannerSerial.available()) {
+    char c = (char)ScannerSerial.read();
+    Serial.print("[DEBUG] Byte empfangen: 0x");
+    Serial.print((uint8_t)c, HEX);
+    Serial.print(" '");
+    if (c >= 32) Serial.print(c);
+    Serial.println("'");
+
+    if (c == '\r' || c == '\n') {
+      if (scanBuffer.length() > 0) {
+        Serial.print("[Scanner] Barcode: ");
+        Serial.println(scanBuffer);
+        publishBarcode(scanBuffer);
+        scanBuffer = "";
+      }
+    } else {
+      scanBuffer += c;
+    }
+  }
+
   unsigned long now = millis();
+
+  // ─── Taster + Waage: Serial-Ausgabe alle 500 ms ───────────
+  if (now - lastSensorMs >= SENSOR_INTERVAL) {
+    lastSensorMs = now;
+
+    Serial.print("[Taster]  ");
+    for (int i = 0; i < 4; i++) {
+      bool gedrueckt = (digitalRead(TASTER_PINS[i]) == LOW);
+      Serial.print(TASTER_NAMEN[i]);
+      Serial.print(": ");
+      Serial.print(gedrueckt ? "AN " : "AUS");
+      if (i < 3) Serial.print("  |  ");
+    }
+    Serial.println();
+
+    if (waage.is_ready()) {
+      float gramm   = waage.get_units(5);
+      float rohwert = waage.get_value(1);
+      Serial.print("[Waage]   Gewicht: ");
+      Serial.print(gramm, 1);
+      Serial.print(" g  (Rohwert: ");
+      Serial.print(rohwert, 0);
+      Serial.println(")");
+    } else {
+      Serial.println("[Waage]   HX711 nicht bereit");
+    }
+  }
+
+  // ─── MQTT Heartbeat alle 5 s ──────────────────────────────
   if (now - lastPublishMs >= PUBLISH_INTERVAL) {
     lastPublishMs = now;
     publishTestMessage("Heartbeat");
