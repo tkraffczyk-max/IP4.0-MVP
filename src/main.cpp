@@ -24,15 +24,19 @@
  */
 
 #include <WiFi.h>
+#include <WiFiMulti.h>
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <HX711.h>
 #include <Preferences.h>
 
-// ─── WLAN ──────────────────────────────────────────────────
+// ─── WLAN (mehrere Netzwerke) ──────────────────────────────
 const char* WIFI_SSID     = "iPhone Sebastian";
 const char* WIFI_PASSWORD = "12345678";
+const char* WIFI_SSID2    = "Teunis";
+const char* WIFI_PASSWORD2= "maasssiiii";
+WiFiMulti wifiMulti;
 
 // ─── AWS IoT Endpoint ──────────────────────────────────────
 const char* AWS_ENDPOINT  = "a1niwvuc208pma-ats.iot.eu-central-1.amazonaws.com";
@@ -169,17 +173,19 @@ const long    SENSOR_INTERVAL = 2000;
 
 // ─── WLAN verbinden ────────────────────────────────────────
 void connectWifi() {
-  Serial.print("[WLAN] Verbinde mit: ");
-  Serial.println(WIFI_SSID);
   WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  wifiMulti.addAP(WIFI_SSID,  WIFI_PASSWORD);
+  wifiMulti.addAP(WIFI_SSID2, WIFI_PASSWORD2);
 
-  while (WiFi.status() != WL_CONNECTED) {
+  Serial.println("[WLAN] Suche bekannte Netzwerke ...");
+  while (wifiMulti.run() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
   Serial.println();
-  Serial.print("[WLAN] Verbunden! IP: ");
+  Serial.print("[WLAN] Verbunden mit: ");
+  Serial.println(WiFi.SSID());
+  Serial.print("[WLAN] IP: ");
   Serial.println(WiFi.localIP());
 }
 
