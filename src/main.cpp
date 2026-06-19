@@ -420,6 +420,7 @@ void loop() {
       waage.tare();
       Serial.println("[Waage]   Nullpunkt gesetzt. Bekanntes Gewicht auflegen.");
       Serial.println("[Waage]   Dann Gramm-Wert eingeben (z.B. 1000) + ENTER:");
+      while (Serial.available()) Serial.read();  // Puffer leeren (Rest vom 'k'-Enter)
       while (!Serial.available()) { delay(100); }
       float bekannt = Serial.parseFloat();
       Serial.flush();
@@ -478,9 +479,4 @@ void loop() {
     }
   }
 
-  // ─── MQTT Heartbeat alle 5 s ──────────────────────────────
-  if (now - lastPublishMs >= PUBLISH_INTERVAL) {
-    lastPublishMs = now;
-    publishTestMessage("Heartbeat");
-  }
 }
