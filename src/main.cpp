@@ -65,6 +65,12 @@ HardwareSerial ScannerSerial(2);  // UART2
 const int   TASTER_PINS[4]    = {25, 26, 27, 32};
 const char* TASTER_NAMEN[4]   = {"T1(G25)", "T2(G26)", "T3(G27)", "T4(G32)"};
 
+// ─── Action-Schalter: Einlagern (IN) / Entnehmen (OUT) ────
+//  Mapping: LOW (gedrückt / auf OUT geschaltet) → "out"
+//           HIGH (offen)                        → "in"
+//  GPIO 25 entspricht T1(G25) aus TASTER_PINS oben.
+const int ACTION_SWITCH_PIN = 25;
+
 // ─── Wägezellen / HX711 ────────────────────────────────────
 const int   HX711_DT_PIN      = 18;   // DOUT → GPIO18
 const int   HX711_SCK_PIN     = 19;   // SCK  → GPIO19
@@ -321,16 +327,22 @@ void lookupAndPublish(const String& ean) {
     return;
   }
 
-  float gewicht = waage.is_ready() ? waage.get_units(5) : 0.0;
+  // LOW (gedrückt / auf OUT geschaltet) → "out",  HIGH (offen) → "in"
+  const char* action = (digitalRead(ACTION_SWITCH_PIN) == LOW) ? "out" : "in";
 
   // Einzige MQTT-Nachricht mit allen Daten
   StaticJsonDocument<768> mqtt_doc;
   mqtt_doc["device"]       = CLIENT_ID;
+  mqtt_doc["action"]       = action;
   mqtt_doc["ean"]          = ean;
   mqtt_doc["product_name"] = name;
   mqtt_doc["brands"]       = brands;
   mqtt_doc["categories"]   = categories;
-  mqtt_doc["gewicht_g"]    = gewicht;
+  if (waage.is_ready()) {
+    mqtt_doc["gewicht_g"]  = waage.get_units(5);
+  } else {
+    mqtt_doc["gewicht_g"]  = nullptr;  // keine gültige Messung → JSON null
+  }
   mqtt_doc["uptime_s"]     = millis() / 1000;
 
   char jsonBuffer[768];
@@ -373,6 +385,11 @@ void setup() {
     pinMode(TASTER_PINS[i], INPUT_PULLUP);
   }
   Serial.println("[Taster]  Bereit auf GPIO 25, 26, 27, 32");
+
+  // Action-Schalter explizit initialisieren (GPIO 32 wird oben bereits durch
+  // TASTER_PINS-Schleife abgedeckt; dieser Aufruf dokumentiert die Absicht)
+  pinMode(ACTION_SWITCH_PIN, INPUT_PULLUP);
+  Serial.println("[Action]  Schalter Einlagern/Entnehmen bereit auf GPIO 25");
 
   // Kalibrierfaktor aus NVS laden (überlebt Flashen)
   prefs.begin("waage", true);
