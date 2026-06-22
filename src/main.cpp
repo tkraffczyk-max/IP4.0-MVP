@@ -1,4 +1,4 @@
-﻿/*Neuer Code18.06.26
+﻿/*Neuer Code 18.06.26
  * ============================================================
  *  ESP32 → AWS IoT Core  |  Arduino IDE
  *  Region:  eu-central-1
