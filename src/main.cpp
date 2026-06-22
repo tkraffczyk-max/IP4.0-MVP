@@ -382,7 +382,16 @@ void publishWithWeight(const String& ean) {
     return;
   }
 
-  const char* action = (digitalRead(ACTION_SWITCH_PIN) == LOW) ? "out" : "in";
+  // Bei "out" kein Publish – wird im Backend verarbeitet
+  if (digitalRead(ACTION_SWITCH_PIN) == LOW) {
+    Serial.println("[MQTT] Status 'out' – kein Publish");
+    showDisplay("Status: OUT", "Kein Publish");
+    readyTimerStart = millis();
+    readyPending    = true;
+    return;
+  }
+
+  const char* action = "in";
   float gewicht = waage.is_ready() ? waage.get_units(5) : 0.0;
 
   StaticJsonDocument<768> mqtt_doc;
