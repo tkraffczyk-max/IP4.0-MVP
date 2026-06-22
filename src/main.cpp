@@ -191,7 +191,7 @@ const long    SENSOR_INTERVAL = 2000;
 String        pendingEAN      = "";
 unsigned long scanTimerStart  = 0;
 bool          scanPending     = false;
-const long    SCAN_DELAY_MS   = 5000;
+const long    SCAN_DELAY_MS   = 5000;   // Wartezeit nach API-Abruf bevor Publish
 
 // ─── Zwischengespeicherte Produktdaten ────────────────────
 String        storedName      = "";
@@ -371,7 +371,7 @@ void fetchAndDisplay(const String& ean) {
   showDisplay(storedName.substring(0, 21),
               storedBrands.substring(0, 21),
               storedQuantity.length() > 0 ? storedQuantity.substring(0, 21) : "",
-              "Gewicht in 5s...");
+              "Bitte wiegen...");
 }
 
 // ─── Nach 5s: Gewicht lesen + MQTT publish ────────────────
@@ -533,11 +533,16 @@ void loop() {
     char c = (char)ScannerSerial.read();
     if (c == '\r' || c == '\n') {
       if (scanBuffer.length() > 0) {
-        pendingEAN     = scanBuffer;
-        scanTimerStart = millis();
-        scanPending    = true;
-        scanBuffer     = "";
-        fetchAndDisplay(pendingEAN);  // sofort: API + Display
+        pendingEAN  = scanBuffer;
+        scanBuffer  = "";
+        scanPending = false;
+        fetchAndDisplay(pendingEAN);        // blockiert bis API fertig
+        if (productFetched) {              // nur wenn Produkt gefunden
+          scanTimerStart = millis();       // 5s-Timer startet NACH den API-Calls
+          scanPending    = true;
+        } else {
+          pendingEAN = "";
+        }
       }
     } else {
       scanBuffer += c;
