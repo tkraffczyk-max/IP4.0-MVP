@@ -200,6 +200,11 @@ String        storedCategories= "";
 String        storedQuantity  = "";
 bool          productFetched  = false;
 
+// ─── "Bereit"-Anzeige nach Publish ───────────────────────
+unsigned long readyTimerStart = 0;
+bool          readyPending    = false;
+const long    READY_DELAY_MS  = 5000;
+
 
 // ─── WLAN verbinden ────────────────────────────────────────
 void connectWifi() {
@@ -283,16 +288,37 @@ void publishTestMessage(const char* statusText) {
 }
 
 
+// ─── Zentrierte Display-Ausgabe ───────────────────────────
+void showDisplay(const String& l1, const String& l2 = "",
+                 const String& l3 = "", const String& l4 = "") {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  const String* lines[4] = {&l1, &l2, &l3, &l4};
+  int count = 0;
+  for (int i = 0; i < 4; i++) if (lines[i]->length() > 0) count++;
+
+  int startY = (SCREEN_HEIGHT - count * 8) / 2;
+  int row    = 0;
+  for (int i = 0; i < 4; i++) {
+    if (lines[i]->length() == 0) continue;
+    int16_t x1, y1; uint16_t w, h;
+    display.getTextBounds(*lines[i], 0, 0, &x1, &y1, &w, &h);
+    int x = max(0, (SCREEN_WIDTH - (int)w) / 2);
+    display.setCursor(x, startY + row * 8);
+    display.print(*lines[i]);
+    row++;
+  }
+  display.display();
+}
+
 // ─── Sofortanzeige: API abrufen + Display ─────────────────
 void fetchAndDisplay(const String& ean) {
   productFetched = false;
   Serial.print("[API] EAN: "); Serial.println(ean);
 
-  display.clearDisplay();
-  display.setCursor(0, 0);
-  display.println("Suche Produkt...");
-  display.println(ean);
-  display.display();
+  showDisplay("Suche Produkt...", ean);
 
   WiFiClientSecure httpSecure;
   httpSecure.setInsecure();
@@ -310,8 +336,7 @@ void fetchAndDisplay(const String& ean) {
   if (code != HTTP_CODE_OK) {
     Serial.println("[API] Fehler: " + http.errorToString(code));
     http.end();
-    display.clearDisplay(); display.setCursor(0,0);
-    display.println("API Fehler!"); display.display();
+    showDisplay("API Fehler!", http.errorToString(code));
     return;
   }
 
@@ -321,8 +346,7 @@ void fetchAndDisplay(const String& ean) {
   StaticJsonDocument<1024> doc;
   if (deserializeJson(doc, raw) || doc["status"].as<int>() != 1) {
     Serial.println("[API] Produkt nicht gefunden");
-    display.clearDisplay(); display.setCursor(0,0);
-    display.println("Nicht gefunden!"); display.println(ean); display.display();
+    showDisplay("Nicht gefunden!", ean);
     return;
   }
 
@@ -343,14 +367,11 @@ void fetchAndDisplay(const String& ean) {
   Serial.print("[API] Marke:  "); Serial.println(storedBrands);
   Serial.print("[API] Menge:  "); Serial.println(storedQuantity);
 
-  // Produktname sofort auf Display anzeigen
-  display.clearDisplay();
-  display.setCursor(0, 0);
-  display.println(storedName.substring(0, 21));
-  display.println(storedBrands.substring(0, 21));
-  display.println(storedQuantity.substring(0, 21));
-  display.println("Gewicht in 5s...");
-  display.display();
+  // Produktname sofort zentriert auf Display anzeigen
+  showDisplay(storedName.substring(0, 21),
+              storedBrands.substring(0, 21),
+              storedQuantity.length() > 0 ? storedQuantity.substring(0, 21) : "",
+              "Gewicht in 5s...");
 }
 
 // ─── Nach 5s: Gewicht lesen + MQTT publish ────────────────
@@ -382,11 +403,10 @@ void publishWithWeight(const String& ean) {
   Serial.print("[MQTT] Gesendet: "); Serial.println(ok ? "OK ✓" : "FEHLER ✗");
   Serial.println(jsonBuffer);
 
-  display.clearDisplay();
-  display.setCursor(0, 0);
-  display.println(ok ? "Gesendet!" : "Send-Fehler!");
-  display.println(storedName.substring(0, 21));
-  display.display();
+  showDisplay(ok ? "Gesendet!" : "Send-Fehler!", storedName.substring(0, 21));
+
+  readyTimerStart = millis();
+  readyPending    = true;
 }
 
 
@@ -529,6 +549,12 @@ void loop() {
     scanPending = false;
     publishWithWeight(pendingEAN);
     pendingEAN  = "";
+  }
+
+  // ─── Nach Publish: "Bereit" nach 5s anzeigen ─────────────
+  if (readyPending && (millis() - readyTimerStart >= READY_DELAY_MS)) {
+    readyPending = false;
+    showDisplay("System bereit", "Bitte scannen");
   }
 
   unsigned long now = millis();
