@@ -24,6 +24,7 @@
  */
 
 #include <WiFi.h>
+#include <WiFiMulti.h>
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
@@ -31,9 +32,12 @@
 #include <Preferences.h>
 #include <HTTPClient.h>
 
-// ─── WLAN ──────────────────────────────────────────────────
+// ─── WLAN (mehrere Netzwerke) ──────────────────────────────
 const char* WIFI_SSID     = "iPhone Sebastian";
 const char* WIFI_PASSWORD = "12345678";
+const char* WIFI_SSID2    = "Teunis";
+const char* WIFI_PASSWORD2= "maasssiiii";
+WiFiMulti wifiMulti;
 
 // ─── AWS IoT Endpoint ──────────────────────────────────────
 const char* AWS_ENDPOINT  = "a1niwvuc208pma-ats.iot.eu-central-1.amazonaws.com";
@@ -60,6 +64,12 @@ HardwareSerial ScannerSerial(2);  // UART2
 //  INPUT_PULLUP: LOW = gedrückt, HIGH = offen
 const int   TASTER_PINS[4]    = {25, 26, 27, 32};
 const char* TASTER_NAMEN[4]   = {"T1(G25)", "T2(G26)", "T3(G27)", "T4(G32)"};
+
+// ─── Action-Schalter: Einlagern (IN) / Entnehmen (OUT) ────
+//  Mapping: LOW (gedrückt / auf OUT geschaltet) → "out"
+//           HIGH (offen)                        → "in"
+//  GPIO 25 entspricht T1(G25) aus TASTER_PINS oben.
+const int ACTION_SWITCH_PIN = 25;
 
 // ─── Wägezellen / HX711 ────────────────────────────────────
 const int   HX711_DT_PIN      = 18;   // DOUT → GPIO18
@@ -170,17 +180,19 @@ const long    SENSOR_INTERVAL = 2000;
 
 // ─── WLAN verbinden ────────────────────────────────────────
 void connectWifi() {
-  Serial.print("[WLAN] Verbinde mit: ");
-  Serial.println(WIFI_SSID);
   WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  wifiMulti.addAP(WIFI_SSID,  WIFI_PASSWORD);
+  wifiMulti.addAP(WIFI_SSID2, WIFI_PASSWORD2);
 
-  while (WiFi.status() != WL_CONNECTED) {
+  Serial.println("[WLAN] Suche bekannte Netzwerke ...");
+  while (wifiMulti.run() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
   Serial.println();
-  Serial.print("[WLAN] Verbunden! IP: ");
+  Serial.print("[WLAN] Verbunden mit: ");
+  Serial.println(WiFi.SSID());
+  Serial.print("[WLAN] IP: ");
   Serial.println(WiFi.localIP());
 }
 
@@ -315,16 +327,22 @@ void lookupAndPublish(const String& ean) {
     return;
   }
 
-  float gewicht = waage.is_ready() ? waage.get_units(5) : 0.0;
+  // LOW (gedrückt / auf OUT geschaltet) → "out",  HIGH (offen) → "in"
+  const char* action = (digitalRead(ACTION_SWITCH_PIN) == LOW) ? "out" : "in";
 
   // Einzige MQTT-Nachricht mit allen Daten
   StaticJsonDocument<768> mqtt_doc;
   mqtt_doc["device"]       = CLIENT_ID;
+  mqtt_doc["action"]       = action;
   mqtt_doc["ean"]          = ean;
   mqtt_doc["product_name"] = name;
   mqtt_doc["brands"]       = brands;
   mqtt_doc["categories"]   = categories;
-  mqtt_doc["gewicht_g"]    = gewicht;
+  if (waage.is_ready()) {
+    mqtt_doc["gewicht_g"]  = waage.get_units(5);
+  } else {
+    mqtt_doc["gewicht_g"]  = nullptr;  // keine gültige Messung → JSON null
+  }
   mqtt_doc["uptime_s"]     = millis() / 1000;
 
   char jsonBuffer[768];
@@ -367,6 +385,11 @@ void setup() {
     pinMode(TASTER_PINS[i], INPUT_PULLUP);
   }
   Serial.println("[Taster]  Bereit auf GPIO 25, 26, 27, 32");
+
+  // Action-Schalter explizit initialisieren (GPIO 32 wird oben bereits durch
+  // TASTER_PINS-Schleife abgedeckt; dieser Aufruf dokumentiert die Absicht)
+  pinMode(ACTION_SWITCH_PIN, INPUT_PULLUP);
+  Serial.println("[Action]  Schalter Einlagern/Entnehmen bereit auf GPIO 25");
 
   // Kalibrierfaktor aus NVS laden (überlebt Flashen)
   prefs.begin("waage", true);
@@ -414,6 +437,7 @@ void loop() {
       waage.tare();
       Serial.println("[Waage]   Nullpunkt gesetzt. Bekanntes Gewicht auflegen.");
       Serial.println("[Waage]   Dann Gramm-Wert eingeben (z.B. 1000) + ENTER:");
+      while (Serial.available()) Serial.read();  // Puffer leeren (Rest vom 'k'-Enter)
       while (!Serial.available()) { delay(100); }
       float bekannt = Serial.parseFloat();
       Serial.flush();
@@ -472,9 +496,4 @@ void loop() {
     }
   }
 
-  // ─── MQTT Heartbeat alle 5 s ──────────────────────────────
-  if (now - lastPublishMs >= PUBLISH_INTERVAL) {
-    lastPublishMs = now;
-    publishTestMessage("Heartbeat");
-  }
 }
