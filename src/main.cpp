@@ -174,6 +174,8 @@ bmwsDhiKfsmLXomX00p2E6Qrq/5FhAXwMuYgaAoyoZs9sQmdyCl/
 
 // ─── Forward Declarations ──────────────────────────────────
 void publishTestMessage(const char* statusText);
+void showDisplay(const String& l1, const String& l2, const String& l3, const String& l4);
+void publishOutStatus(const char* status, float gewicht, const char* line2);
 void fetchAndDisplay(const String& ean);
 void publishWithWeight(const String& ean);
 
@@ -204,6 +206,17 @@ bool          productFetched  = false;
 unsigned long readyTimerStart = 0;
 bool          readyPending    = false;
 const long    READY_DELAY_MS  = 5000;
+
+// ─── Out-Monitoring (Entnahme-Knopf GPIO25) ───────────────
+enum OutState { OUT_IDLE, OUT_ARMED, OUT_SETTLING_1, OUT_WAIT_RETURN, OUT_SETTLING_2 };
+OutState      outState        = OUT_IDLE;
+float         outRefWeight    = 0.0;   // Gewicht VOR Entnahme
+float         outAfterWeight  = 0.0;  // Gewicht NACH Entnahme (eingeschwungen)
+unsigned long outSettleStart  = 0;
+unsigned long outLastReadMs   = 0;
+bool          prevOutBtn      = HIGH;
+const long    OUT_SETTLE_MS   = 2000;
+const float   OUT_THRESHOLD_G = 25.0;
 
 
 // ─── WLAN verbinden ────────────────────────────────────────
@@ -311,6 +324,21 @@ void showDisplay(const String& l1, const String& l2 = "",
     row++;
   }
   display.display();
+}
+
+// ─── Out_1 / Out_2 per MQTT senden ───────────────────────
+void publishOutStatus(const char* status, float gewicht, const char* line2) {
+  if (!mqttClient.connected()) return;
+  StaticJsonDocument<256> doc;
+  doc["device"]    = CLIENT_ID;
+  doc["status"]    = status;
+  doc["gewicht_g"] = gewicht;
+  doc["uptime_s"]  = millis() / 1000;
+  char buf[256];
+  serializeJson(doc, buf);
+  bool ok = mqttClient.publish(TOPIC_PUB, buf);
+  Serial.printf("[MQTT] %s: %.1f g – %s\n", status, gewicht, ok ? "OK" : "FEHLER");
+  showDisplay(status, String(line2), "", "");
 }
 
 // ─── Sofortanzeige: API abrufen + Display ─────────────────
@@ -572,6 +600,101 @@ void loop() {
   }
 
   unsigned long now = millis();
+
+  // ─── Out-Monitoring: Entnahme-Knopf (GPIO25, Flanke) ─────
+  {
+    bool outBtn  = (digitalRead(ACTION_SWITCH_PIN) == LOW);
+    bool pressed = (outBtn && !prevOutBtn);
+    prevOutBtn   = outBtn;
+
+    bool  freshRead = false;
+    float curW      = 0.0;
+    // Nur in ARMED/WAIT_RETURN lesen – nicht während Einpendelzeiten
+    if ((outState == OUT_ARMED || outState == OUT_WAIT_RETURN) &&
+        waage.is_ready() && (now - outLastReadMs >= 500)) {
+      outLastReadMs = now;
+      curW          = waage.get_units(1);
+      freshRead     = true;
+    }
+
+    switch (outState) {
+      case OUT_IDLE:
+        if (pressed) {
+          outRefWeight  = waage.is_ready() ? waage.get_units(3) : 0.0;
+          outLastReadMs = now;
+          outState      = OUT_ARMED;
+          Serial.printf("[OUT] Entnahme aktiv – Ref: %.1f g\n", outRefWeight);
+          showDisplay("Entnahme aktiv", String(outRefWeight, 1) + "g Ref", "", "");
+        }
+        break;
+
+      case OUT_ARMED:
+        if (freshRead && (outRefWeight - curW) > OUT_THRESHOLD_G) {
+          outSettleStart = now;
+          outState       = OUT_SETTLING_1;
+          Serial.printf("[OUT] Abnahme %.1f g – warte 2s\n", outRefWeight - curW);
+          showDisplay("Messe Entnahme", "Einpendeln...", "", "");
+        }
+        break;
+
+      case OUT_SETTLING_1:
+        if (now - outSettleStart >= OUT_SETTLE_MS) {
+          unsigned long t0 = millis();
+          while (!waage.is_ready() && millis() - t0 < 300) delay(5);
+          float settled = waage.is_ready() ? waage.get_units(5) : 0.0;
+          float removed = outRefWeight - settled;
+          if (removed > OUT_THRESHOLD_G) {
+            outAfterWeight = settled;
+            char disp[22];
+            snprintf(disp, sizeof(disp), "%.1f g entnommen", removed);
+            publishOutStatus("Out_1", removed, disp);
+            outState = OUT_WAIT_RETURN;
+          } else {
+            outState = OUT_ARMED;
+          }
+        }
+        break;
+
+      case OUT_WAIT_RETURN:
+        if (freshRead && (curW - outAfterWeight) > OUT_THRESHOLD_G) {
+          outSettleStart = now;
+          outState       = OUT_SETTLING_2;
+          Serial.printf("[OUT] Zunahme %.1f g – warte 2s\n", curW - outAfterWeight);
+          showDisplay("Objekt zurueck", "Einpendeln...", "", "");
+        }
+        break;
+
+      case OUT_SETTLING_2:
+        if (now - outSettleStart >= OUT_SETTLE_MS) {
+          unsigned long t0 = millis();
+          while (!waage.is_ready() && millis() - t0 < 300) delay(5);
+          float settled = waage.is_ready() ? waage.get_units(5) : 0.0;
+          if ((settled - outAfterWeight) > OUT_THRESHOLD_G) {
+            float netto = outRefWeight - outAfterWeight;
+            if (mqttClient.connected()) {
+              StaticJsonDocument<256> doc;
+              doc["device"]    = CLIENT_ID;
+              doc["status"]    = "Out_2";
+              doc["gewicht_g"] = settled;
+              doc["netto_g"]   = netto;
+              doc["uptime_s"]  = millis() / 1000;
+              char buf[256];
+              serializeJson(doc, buf);
+              bool ok = mqttClient.publish(TOPIC_PUB, buf);
+              Serial.printf("[MQTT] Out_2: %.1f g gesamt, %.1f g netto – %s\n",
+                            settled, netto, ok ? "OK" : "FEHLER");
+            }
+            showDisplay("Out_2",
+                        String(settled, 1) + "g gesamt",
+                        String(outRefWeight - outAfterWeight, 1) + "g Netto", "");
+            outState = OUT_IDLE;
+          } else {
+            outState = OUT_WAIT_RETURN;
+          }
+        }
+        break;
+    }
+  }
 
   // ─── Taster + Waage: Serial-Ausgabe alle 500 ms ───────────
   if (now - lastSensorMs >= SENSOR_INTERVAL) {
