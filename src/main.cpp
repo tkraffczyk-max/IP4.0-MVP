@@ -431,7 +431,14 @@ void loop() {
   // ─── Kalibrierung jederzeit per 'k' auslösbar ─────────────
   while (Serial.available()) {
     char c = (char)Serial.read();
-    if (c == 'k' || c == 'K') {
+    if (c == 'r' || c == 'R') {
+      prefs.begin("waage", false);
+      prefs.remove("kalib");
+      prefs.end();
+      waage.set_scale(-7050.0);
+      waage.tare();
+      Serial.println("[Waage]   Kalibrierfaktor zurueckgesetzt! Bitte neu kalibrieren mit 'k'.");
+    } else if (c == 'k' || c == 'K') {
       Serial.println("[Waage]   Kalibrierung gestartet – Waage leer lassen...");
       delay(2000);
       waage.tare();
