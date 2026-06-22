@@ -31,6 +31,15 @@
 #include <HX711.h>
 #include <Preferences.h>
 #include <HTTPClient.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+#define SCREEN_WIDTH  128
+#define SCREEN_HEIGHT  32
+#define OLED_RESET     -1
+#define OLED_ADDRESS 0x3C
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // ─── WLAN (mehrere Netzwerke) ──────────────────────────────
 const char* WIFI_SSID     = "iPhone Sebastian";
@@ -165,17 +174,31 @@ bmwsDhiKfsmLXomX00p2E6Qrq/5FhAXwMuYgaAoyoZs9sQmdyCl/
 
 // ─── Forward Declarations ──────────────────────────────────
 void publishTestMessage(const char* statusText);
-void lookupAndPublish(const String& ean);
+void fetchAndDisplay(const String& ean);
+void publishWithWeight(const String& ean);
 
 // ─── Globale Objekte ───────────────────────────────────────
 WiFiClientSecure  wifiSecure;
 PubSubClient      mqttClient(wifiSecure);
 
-unsigned long lastPublishMs  = 0;
-unsigned long lastSensorMs   = 0;
-int           messageCount   = 0;
-String        scanBuffer     = "";
+unsigned long lastPublishMs   = 0;
+unsigned long lastSensorMs    = 0;
+int           messageCount    = 0;
+String        scanBuffer      = "";
 const long    SENSOR_INTERVAL = 2000;
+
+// ─── 5s-Verzögerung nach Scan ─────────────────────────────
+String        pendingEAN      = "";
+unsigned long scanTimerStart  = 0;
+bool          scanPending     = false;
+const long    SCAN_DELAY_MS   = 5000;
+
+// ─── Zwischengespeicherte Produktdaten ────────────────────
+String        storedName      = "";
+String        storedBrands    = "";
+String        storedCategories= "";
+String        storedQuantity  = "";
+bool          productFetched  = false;
 
 
 // ─── WLAN verbinden ────────────────────────────────────────
@@ -222,8 +245,6 @@ void connectMQTT() {
       mqttClient.subscribe(TOPIC_SUB);
       Serial.print("[MQTT] Subscribed auf: ");
       Serial.println(TOPIC_SUB);
-
-      publishTestMessage("ESP32 verbunden mit AWS IoT Core!");
     } else {
       Serial.print(" Fehler, rc=");
       Serial.print(mqttClient.state());
@@ -262,97 +283,110 @@ void publishTestMessage(const char* statusText) {
 }
 
 
-// ─── EAN → OpenFoodFacts API → MQTT ───────────────────────
-void lookupAndPublish(const String& ean) {
-  Serial.print("[API] EAN: ");
-  Serial.print(ean);
-  Serial.print("  Freier Heap: ");
-  Serial.println(ESP.getFreeHeap());
+// ─── Sofortanzeige: API abrufen + Display ─────────────────
+void fetchAndDisplay(const String& ean) {
+  productFetched = false;
+  Serial.print("[API] EAN: "); Serial.println(ean);
+
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println("Suche Produkt...");
+  display.println(ean);
+  display.display();
 
   WiFiClientSecure httpSecure;
   httpSecure.setInsecure();
 
   HTTPClient http;
-  // ?fields= begrenzt die Antwort auf ~500 Bytes statt 100+ KB
   String url = "https://world.openfoodfacts.org/api/v0/product/" + ean
-             + ".json?fields=status,product_name,brands,categories";
+             + ".json?fields=status,product_name,brands,categories,product_quantity,quantity_per_unit";
   http.begin(httpSecure, url);
   http.setTimeout(15000);
   http.addHeader("User-Agent", "ESP32-IoT-Scanner/1.0");
 
   int code = http.GET();
-  Serial.print("[API] HTTP Code: ");
-  Serial.println(code);
+  Serial.print("[API] HTTP Code: "); Serial.println(code);
 
   if (code != HTTP_CODE_OK) {
-    Serial.print("[API] Fehler: ");
-    Serial.println(http.errorToString(code));
+    Serial.println("[API] Fehler: " + http.errorToString(code));
     http.end();
+    display.clearDisplay(); display.setCursor(0,0);
+    display.println("API Fehler!"); display.display();
     return;
   }
 
   String raw = http.getString();
   http.end();
-  Serial.print("[API] Antwort: ");
-  Serial.println(raw);
 
   StaticJsonDocument<1024> doc;
-  DeserializationError err = deserializeJson(doc, raw);
-
-  if (err) {
-    Serial.print("[API] JSON Fehler: ");
-    Serial.println(err.c_str());
+  if (deserializeJson(doc, raw) || doc["status"].as<int>() != 1) {
+    Serial.println("[API] Produkt nicht gefunden");
+    display.clearDisplay(); display.setCursor(0,0);
+    display.println("Nicht gefunden!"); display.println(ean); display.display();
     return;
   }
 
-  Serial.print("[API] Status: ");
-  Serial.println(doc["status"].as<int>());
+  storedName       = doc["product"]["product_name"] | "unbekannt";
+  storedBrands     = doc["product"]["brands"]       | "unbekannt";
+  storedCategories = doc["product"]["categories"]   | "unbekannt";
+  if (storedCategories.length() > 120) storedCategories = storedCategories.substring(0, 120);
 
-  if (doc["status"].as<int>() != 1) {
-    Serial.println("[API] Produkt nicht gefunden – kein Publish");
-    return;
-  }
+  storedQuantity = "";
+  if (!doc["product"]["product_quantity"].isNull())
+    storedQuantity = doc["product"]["product_quantity"].as<String>();
+  else if (!doc["product"]["quantity_per_unit"].isNull())
+    storedQuantity = doc["product"]["quantity_per_unit"].as<String>();
 
-  String name       = doc["product"]["product_name"] | "unbekannt";
-  String brands     = doc["product"]["brands"]       | "unbekannt";
-  String categories = doc["product"]["categories"]   | "unbekannt";
-  if (categories.length() > 120) categories = categories.substring(0, 120);
+  productFetched = true;
 
-  Serial.print("[API] Name:   "); Serial.println(name);
-  Serial.print("[API] Marke:  "); Serial.println(brands);
-  Serial.print("[API] Kateg.: "); Serial.println(categories);
+  Serial.print("[API] Name:   "); Serial.println(storedName);
+  Serial.print("[API] Marke:  "); Serial.println(storedBrands);
+  Serial.print("[API] Menge:  "); Serial.println(storedQuantity);
 
+  // Produktname sofort auf Display anzeigen
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println(storedName.substring(0, 21));
+  display.println(storedBrands.substring(0, 21));
+  display.println(storedQuantity.substring(0, 21));
+  display.println("Gewicht in 5s...");
+  display.display();
+}
+
+// ─── Nach 5s: Gewicht lesen + MQTT publish ────────────────
+void publishWithWeight(const String& ean) {
+  if (!productFetched) return;
   if (!mqttClient.connected()) {
     Serial.println("[MQTT] Nicht verbunden – Publish abgebrochen");
     return;
   }
 
-  // LOW (gedrückt / auf OUT geschaltet) → "out",  HIGH (offen) → "in"
   const char* action = (digitalRead(ACTION_SWITCH_PIN) == LOW) ? "out" : "in";
+  float gewicht = waage.is_ready() ? waage.get_units(5) : 0.0;
 
-  // Einzige MQTT-Nachricht mit allen Daten
   StaticJsonDocument<768> mqtt_doc;
-  mqtt_doc["device"]       = CLIENT_ID;
-  mqtt_doc["action"]       = action;
-  mqtt_doc["ean"]          = ean;
-  mqtt_doc["product_name"] = name;
-  mqtt_doc["brands"]       = brands;
-  mqtt_doc["categories"]   = categories;
-  if (waage.is_ready()) {
-    mqtt_doc["gewicht_g"]  = waage.get_units(5);
-  } else {
-    mqtt_doc["gewicht_g"]  = nullptr;  // keine gültige Messung → JSON null
-  }
-  mqtt_doc["uptime_s"]     = millis() / 1000;
+  mqtt_doc["device"]           = CLIENT_ID;
+  mqtt_doc["action"]           = action;
+  mqtt_doc["ean"]              = ean;
+  mqtt_doc["product_name"]     = storedName;
+  mqtt_doc["brands"]           = storedBrands;
+  mqtt_doc["categories"]       = storedCategories;
+  mqtt_doc["product_quantity"] = storedQuantity;
+  mqtt_doc["gewicht_g"]        = gewicht;
+  mqtt_doc["uptime_s"]         = millis() / 1000;
 
   char jsonBuffer[768];
   serializeJson(mqtt_doc, jsonBuffer);
 
   bool ok = mqttClient.publish(TOPIC_PUB, jsonBuffer);
-  Serial.print("[MQTT] Produkt gesendet: ");
-  Serial.println(ok ? "OK ✓" : "FEHLER ✗");
-  Serial.print("[MQTT] Payload: ");
+  Serial.print("[MQTT] Gesendet: "); Serial.println(ok ? "OK ✓" : "FEHLER ✗");
   Serial.println(jsonBuffer);
+
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println(ok ? "Gesendet!" : "Send-Fehler!");
+  display.println(storedName.substring(0, 21));
+  display.display();
 }
 
 
@@ -413,6 +447,19 @@ void setup() {
     Serial.println("[Waage]   HX711 nicht gefunden – Verkabelung pruefen!");
   }
 
+  // OLED Display initialisieren (SDA=GPIO21, SCL=GPIO22)
+  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDRESS)) {
+    Serial.println("[Display] SSD1306 nicht gefunden – Verkabelung pruefen!");
+  } else {
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+    display.println("System bereit.");
+    display.display();
+    Serial.println("[Display] SSD1306 bereit auf SDA=GPIO21, SCL=GPIO22");
+  }
+
   // Verbinden
   connectWifi();
   connectMQTT();
@@ -466,12 +513,22 @@ void loop() {
     char c = (char)ScannerSerial.read();
     if (c == '\r' || c == '\n') {
       if (scanBuffer.length() > 0) {
-        lookupAndPublish(scanBuffer);
-        scanBuffer = "";
+        pendingEAN     = scanBuffer;
+        scanTimerStart = millis();
+        scanPending    = true;
+        scanBuffer     = "";
+        fetchAndDisplay(pendingEAN);  // sofort: API + Display
       }
     } else {
       scanBuffer += c;
     }
+  }
+
+  // ─── 5s abgelaufen → Gewicht + Publish ───────────────────
+  if (scanPending && (millis() - scanTimerStart >= SCAN_DELAY_MS)) {
+    scanPending = false;
+    publishWithWeight(pendingEAN);
+    pendingEAN  = "";
   }
 
   unsigned long now = millis();
