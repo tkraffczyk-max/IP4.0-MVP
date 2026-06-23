@@ -363,8 +363,10 @@ void fetchMHD(const String& produktName, const String& categories) {
   http.addHeader("Content-Type", "application/json");
   http.addHeader("Authorization", String("Bearer ") + CHATBOT_APIKEY);
 
-  String prompt = String("Wie viele Tage ist ein original verschlossenes,"
-                  " gerade im Supermarkt gekauftes Produkt ab Kaufdatum haltbar?"
+  String prompt = String("Wie viele Tage betraegt das typische Mindesthaltbarkeitsdatum (MHD)"
+                  " eines UNGEÖFFNETEN, aus dem Supermarkt gekauften Produkts ab Kaufdatum?"
+                  " Gemeint ist die aufgedruckte Haltbarkeit auf der Verpackung,"
+                  " NICHT die Haltbarkeit nach dem Oeffnen."
                   " Produkt: '") + produktName + "', Kategorie: '" + categories +
                   "'. Antworte AUSSCHLIESSLICH mit einer einzigen ganzen Zahl"
                   " (die Anzahl der Tage). Kein Text, keine Einheit, nur die Zahl.";
@@ -372,7 +374,7 @@ void fetchMHD(const String& produktName, const String& categories) {
   DynamicJsonDocument reqDoc(1280);
   reqDoc["model"]       = CHATBOT_MODEL;
   reqDoc["max_tokens"]  = 500;
-  reqDoc["temperature"] = 0.2;
+  reqDoc["temperature"] = 0.0;
   JsonArray msgs        = reqDoc.createNestedArray("messages");
   JsonObject sys        = msgs.createNestedObject();
   sys["role"]           = "system";

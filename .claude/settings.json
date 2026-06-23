@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(~/.platformio/penv/Scripts/pio run *)"
+      "Bash(~/.platformio/penv/Scripts/pio run *)",
+      "Read(//c/Users/Sebastian/Desktop/**)"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\Sebastian\\Desktop"
     ]
   }
 }
