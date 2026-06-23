@@ -59,6 +59,11 @@ const char* CLIENT_ID     = "ESP321";
 // ─── Port ──────────────────────────────────────────────────
 const int   MQTT_PORT     = 8883;
 
+// ─── FH Aachen Chatbot (MHD-Schätzung, nur spielerisch) ──
+const char* CHATBOT_URL    = "https://chat.kiconnect.nrw/api/v1/chat/completions";
+const char* CHATBOT_APIKEY = "6a394fdab443313573c55afa:/5IBu0qILFwUHMjS4BnS3ypw2UPuFFrquYOhJJ31BqI=";
+const char* CHATBOT_MODEL  = "openai-gpt-oss-120b";
+
 // ─── Intervall für Testnachrichten (Millisekunden) ─────────
 const long  PUBLISH_INTERVAL = 5000;   // alle 5 Sekunden
 
@@ -178,6 +183,7 @@ void showDisplay(const String& l1, const String& l2, const String& l3, const Str
 void publishOutStatus(const char* status, float gewicht, const char* line2);
 void fetchAndDisplay(const String& ean);
 void publishWithWeight(const String& ean);
+void fetchMHD(const String& produktName, const String& categories);
 
 // ─── Globale Objekte ───────────────────────────────────────
 WiFiClientSecure  wifiSecure;
@@ -200,6 +206,8 @@ String        storedName      = "";
 String        storedBrands    = "";
 String        storedCategories= "";
 String        storedQuantity  = "";
+String        storedMHD       = "";
+String        storedMHD_datum = "";
 bool          productFetched  = false;
 
 // ─── "Bereit"-Anzeige nach Publish ───────────────────────
@@ -341,9 +349,107 @@ void publishOutStatus(const char* status, float gewicht, const char* line2) {
   showDisplay(status, String(line2), "", "");
 }
 
+// ─── FH Aachen Chatbot: MHD-Schätzung (spielerisch) ──────
+void fetchMHD(const String& produktName, const String& categories) {
+  storedMHD       = "";
+  storedMHD_datum = "";
+  showDisplay("Schaetze MHD...", produktName.substring(0, 21), "", "");
+
+  WiFiClientSecure httpSecure;
+  httpSecure.setInsecure();
+  HTTPClient http;
+  http.begin(httpSecure, CHATBOT_URL);
+  http.setTimeout(15000);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("Authorization", String("Bearer ") + CHATBOT_APIKEY);
+
+  String prompt = String("Wie viele Tage ist ein original verschlossenes,"
+                  " gerade im Supermarkt gekauftes Produkt ab Kaufdatum haltbar?"
+                  " Produkt: '") + produktName + "', Kategorie: '" + categories +
+                  "'. Antworte AUSSCHLIESSLICH mit einer einzigen ganzen Zahl"
+                  " (die Anzahl der Tage). Kein Text, keine Einheit, nur die Zahl.";
+
+  StaticJsonDocument<1280> reqDoc;
+  reqDoc["model"]       = CHATBOT_MODEL;
+  reqDoc["max_tokens"]  = 500;
+  reqDoc["temperature"] = 0.2;
+  JsonArray msgs        = reqDoc.createNestedArray("messages");
+  JsonObject sys        = msgs.createNestedObject();
+  sys["role"]           = "system";
+  sys["content"]        = "Du bist ein Lebensmittelexperte. Antworte ausschliesslich"
+                          " mit einer ganzen Zahl (Anzahl Tage). Kein Text, kein Satz.";
+  JsonObject m          = msgs.createNestedObject();
+  m["role"]             = "user";
+  m["content"]          = prompt;
+
+  String body;
+  serializeJson(reqDoc, body);
+
+  int code = http.POST(body);
+  Serial.print("[Chatbot] HTTP Code: "); Serial.println(code);
+
+  if (code != HTTP_CODE_OK) {
+    Serial.println("[Chatbot] Fehler: " + http.errorToString(code));
+    http.end();
+    storedMHD = storedMHD_datum = "unbekannt";
+    return;
+  }
+
+  String raw = http.getString();
+  http.end();
+  Serial.print("[Chatbot] Response: "); Serial.println(raw);
+
+  StaticJsonDocument<2048> resDoc;
+  DeserializationError err = deserializeJson(resDoc, raw);
+  if (err) {
+    Serial.print("[Chatbot] JSON Fehler: "); Serial.println(err.c_str());
+    storedMHD = storedMHD_datum = "unbekannt";
+    return;
+  }
+
+  String rawContent = resDoc["choices"][0]["message"]["content"] | "0";
+  rawContent.trim();
+  int days = rawContent.toInt();
+  Serial.print("[Chatbot] Tage: "); Serial.println(days);
+
+  if (days <= 0) {
+    storedMHD = storedMHD_datum = "unbekannt";
+    return;
+  }
+
+  // Tage in lesbare Dauer umwandeln
+  if      (days <= 6)   storedMHD = String(days) + " Tage";
+  else if (days <= 13)  storedMHD = "1 Woche";
+  else if (days <= 29)  storedMHD = String(days / 7) + " Wochen";
+  else if (days <= 59)  storedMHD = "1 Monat";
+  else if (days <= 364) storedMHD = String(days / 30) + " Monate";
+  else if (days <= 729) storedMHD = "1 Jahr";
+  else                  storedMHD = String(days / 365) + " Jahre";
+
+  // MHD-Datum berechnen: aktuelles Datum + Tage
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo)) {
+    time_t t = mktime(&timeinfo);
+    t += (time_t)days * 86400;
+    struct tm future;
+    localtime_r(&t, &future);
+    char dateBuf[11];
+    snprintf(dateBuf, sizeof(dateBuf), "%02d.%02d.%04d",
+             future.tm_mday, future.tm_mon + 1, future.tm_year + 1900);
+    storedMHD_datum = String(dateBuf);
+  } else {
+    storedMHD_datum = "NTP fehlt";
+  }
+
+  Serial.print("[Chatbot] MHD Dauer: "); Serial.println(storedMHD);
+  Serial.print("[Chatbot] MHD Datum: "); Serial.println(storedMHD_datum);
+}
+
 // ─── Sofortanzeige: API abrufen + Display ─────────────────
 void fetchAndDisplay(const String& ean) {
-  productFetched = false;
+  productFetched  = false;
+  storedMHD       = "";
+  storedMHD_datum = "";
   Serial.print("[API] EAN: "); Serial.println(ean);
 
   showDisplay("Suche Produkt...", ean);
@@ -395,7 +501,9 @@ void fetchAndDisplay(const String& ean) {
   Serial.print("[API] Marke:  "); Serial.println(storedBrands);
   Serial.print("[API] Menge:  "); Serial.println(storedQuantity);
 
-  // Produktname sofort zentriert auf Display anzeigen
+  // MHD vom FH Aachen Chatbot schätzen lassen (spielerisch)
+  fetchMHD(storedName, storedCategories);
+
   showDisplay(storedName.substring(0, 21),
               storedBrands.substring(0, 21),
               storedQuantity.length() > 0 ? storedQuantity.substring(0, 21) : "",
@@ -422,7 +530,7 @@ void publishWithWeight(const String& ean) {
   const char* action = "in";
   float gewicht = waage.is_ready() ? waage.get_units(5) : 0.0;
 
-  StaticJsonDocument<768> mqtt_doc;
+  StaticJsonDocument<1024> mqtt_doc;
   mqtt_doc["device"]           = CLIENT_ID;
   mqtt_doc["action"]           = action;
   mqtt_doc["ean"]              = ean;
@@ -430,10 +538,12 @@ void publishWithWeight(const String& ean) {
   mqtt_doc["brands"]           = storedBrands;
   mqtt_doc["categories"]       = storedCategories;
   mqtt_doc["product_quantity"] = storedQuantity;
+  mqtt_doc["mhd_schaetzung"]   = storedMHD;
+  mqtt_doc["mhd_datum"]        = storedMHD_datum;
   mqtt_doc["gewicht_g"]        = gewicht;
   mqtt_doc["uptime_s"]         = millis() / 1000;
 
-  char jsonBuffer[768];
+  char jsonBuffer[1024];
   serializeJson(mqtt_doc, jsonBuffer);
 
   bool ok = mqttClient.publish(TOPIC_PUB, jsonBuffer);
@@ -519,6 +629,15 @@ void setup() {
 
   // Verbinden
   connectWifi();
+
+  // NTP Zeitsynchronisation (fuer MHD-Datumsberechnung)
+  setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);
+  tzset();
+  configTime(0, 0, "pool.ntp.org");
+  Serial.print("[NTP] Synchronisiere Zeit");
+  { struct tm t; for (int i = 0; i < 20 && !getLocalTime(&t); i++) { delay(500); Serial.print("."); } }
+  Serial.println();
+
   connectMQTT();
 }
 
