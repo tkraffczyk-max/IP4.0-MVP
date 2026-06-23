@@ -182,7 +182,7 @@ void publishTestMessage(const char* statusText);
 void showDisplay(const String& l1, const String& l2, const String& l3, const String& l4);
 void publishOutStatus(const char* status, float gewicht, const char* line2);
 void fetchAndDisplay(const String& ean);
-void publishWithWeight(const String& ean);
+void publishWithWeight(const String& ean, float measuredWeight = -1.0);
 void fetchMHD(const String& produktName, const String& categories);
 
 // ─── Globale Objekte ───────────────────────────────────────
@@ -195,11 +195,9 @@ int           messageCount    = 0;
 String        scanBuffer      = "";
 const long    SENSOR_INTERVAL = 2000;
 
-// ─── 5s-Verzögerung nach Scan ─────────────────────────────
+// ─── Scan-Zustand ─────────────────────────────────────────
 String        pendingEAN      = "";
-unsigned long scanTimerStart  = 0;
 bool          scanPending     = false;
-const long    SCAN_DELAY_MS   = 5000;   // Wartezeit nach API-Abruf bevor Publish
 
 // ─── Zwischengespeicherte Produktdaten ────────────────────
 String        storedName      = "";
@@ -214,6 +212,13 @@ bool          productFetched  = false;
 unsigned long readyTimerStart = 0;
 bool          readyPending    = false;
 const long    READY_DELAY_MS  = 5000;
+
+// ─── In-Monitoring (Einlagerung per Gewichtszunahme) ──────
+enum InState { IN_IDLE, IN_WAIT_PLACE, IN_SETTLING_IN };
+InState       inState         = IN_IDLE;
+float         inRefWeight     = 0.0;
+unsigned long inSettleStart   = 0;
+unsigned long inLastReadMs    = 0;
 
 // ─── Out-Monitoring (Entnahme-Knopf GPIO25) ───────────────
 enum OutState { OUT_IDLE, OUT_ARMED, OUT_SETTLING_1, OUT_WAIT_RETURN, OUT_SETTLING_2 };
@@ -516,7 +521,7 @@ void fetchAndDisplay(const String& ean) {
 }
 
 // ─── Nach 5s: Gewicht lesen + MQTT publish ────────────────
-void publishWithWeight(const String& ean) {
+void publishWithWeight(const String& ean, float measuredWeight) {
   if (!productFetched) return;
   if (!mqttClient.connected()) {
     Serial.println("[MQTT] Nicht verbunden – Publish abgebrochen");
@@ -533,7 +538,8 @@ void publishWithWeight(const String& ean) {
   }
 
   const char* action = "in";
-  float gewicht = waage.is_ready() ? waage.get_units(5) : 0.0;
+  float gewicht = (measuredWeight >= 0) ? measuredWeight
+                : (waage.is_ready() ? waage.get_units(5) : 0.0);
 
   DynamicJsonDocument mqtt_doc(1024);
   mqtt_doc["device"]           = CLIENT_ID;
@@ -694,27 +700,19 @@ void loop() {
     char c = (char)ScannerSerial.read();
     if (c == '\r' || c == '\n') {
       if (scanBuffer.length() > 0) {
-        pendingEAN  = scanBuffer;
-        scanBuffer  = "";
-        scanPending = false;
-        fetchAndDisplay(pendingEAN);        // blockiert bis API fertig
-        if (productFetched) {              // nur wenn Produkt gefunden
-          scanTimerStart = millis();       // 5s-Timer startet NACH den API-Calls
-          scanPending    = true;
-        } else {
-          pendingEAN = "";
-        }
+        pendingEAN   = scanBuffer;
+        scanBuffer   = "";
+        scanPending  = true;
+        productFetched = false;
+        inRefWeight  = waage.is_ready() ? waage.get_units(3) : 0.0;
+        inLastReadMs = millis();
+        inState      = IN_WAIT_PLACE;
+        Serial.printf("[IN] Scan: %s – Ref: %.1f g\n", pendingEAN.c_str(), inRefWeight);
+        showDisplay("Bitte ablegen", pendingEAN, String(inRefWeight, 1) + "g Ref", "");
       }
     } else {
       scanBuffer += c;
     }
-  }
-
-  // ─── 5s abgelaufen → Gewicht + Publish ───────────────────
-  if (scanPending && (millis() - scanTimerStart >= SCAN_DELAY_MS)) {
-    scanPending = false;
-    publishWithWeight(pendingEAN);
-    pendingEAN  = "";
   }
 
   // ─── Nach Publish: "Bereit" nach 5s anzeigen ─────────────
@@ -724,6 +722,33 @@ void loop() {
   }
 
   unsigned long now = millis();
+
+  // ─── In-Monitoring: Gewichtszunahme erkennen ─────────────
+  if (inState == IN_WAIT_PLACE && waage.is_ready() && (now - inLastReadMs >= 500)) {
+    inLastReadMs = now;
+    float curW = waage.get_units(1);
+    if ((curW - inRefWeight) > OUT_THRESHOLD_G) {
+      inSettleStart = now;
+      inState       = IN_SETTLING_IN;
+      Serial.printf("[IN] Zunahme %.1f g – warte 2s\n", curW - inRefWeight);
+      showDisplay("Produkt erkannt", "Einpendeln...", "", "");
+    }
+  }
+  if (inState == IN_SETTLING_IN && (now - inSettleStart >= OUT_SETTLE_MS)) {
+    unsigned long t0 = millis();
+    while (!waage.is_ready() && millis() - t0 < 300) delay(5);
+    float settled = waage.is_ready() ? waage.get_units(5) : 0.0;
+    if ((settled - inRefWeight) > OUT_THRESHOLD_G) {
+      scanPending = false;
+      inState     = IN_IDLE;
+      showDisplay("Suche Produkt...", pendingEAN, "", "");
+      fetchAndDisplay(pendingEAN);
+      publishWithWeight(pendingEAN, settled);
+      pendingEAN  = "";
+    } else {
+      inState = IN_WAIT_PLACE;
+    }
+  }
 
   // ─── Out-Monitoring: Entnahme-Knopf (GPIO25, Flanke) ─────
   {
