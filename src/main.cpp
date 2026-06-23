@@ -181,6 +181,7 @@ bmwsDhiKfsmLXomX00p2E6Qrq/5FhAXwMuYgaAoyoZs9sQmdyCl/
 void publishTestMessage(const char* statusText);
 void showDisplay(const String& l1, const String& l2, const String& l3, const String& l4);
 void publishOutStatus(const char* status, float gewicht, const char* line2);
+void publishDelete(float gewicht);
 void fetchAndDisplay(const String& ean);
 void publishWithWeight(const String& ean, float measuredWeight = -1.0);
 void fetchMHD(const String& produktName, const String& categories);
@@ -230,6 +231,15 @@ unsigned long outLastReadMs   = 0;
 bool          prevOutBtn      = HIGH;
 const long    OUT_SETTLE_MS   = 2000;
 const float   OUT_THRESHOLD_G = 25.0;
+
+// ─── Delete-Monitoring (Löschen-Knopf GPIO27) ─────────────
+#define DELETE_BTN_PIN 27
+enum DelState { DEL_IDLE, DEL_ARMED, DEL_SETTLING };
+DelState      delState        = DEL_IDLE;
+float         delRefWeight    = 0.0;
+unsigned long delSettleStart  = 0;
+unsigned long delLastReadMs   = 0;
+bool          prevDelBtn      = HIGH;
 
 
 // ─── WLAN verbinden ────────────────────────────────────────
@@ -352,6 +362,21 @@ void publishOutStatus(const char* status, float gewicht, const char* line2) {
   bool ok = mqttClient.publish(TOPIC_PUB, buf);
   Serial.printf("[MQTT] %s: %.1f g – %s\n", status, gewicht, ok ? "OK" : "FEHLER");
   showDisplay(status, String(line2), "", "");
+}
+
+// ─── Delete-Payload per MQTT senden ──────────────────────
+void publishDelete(float gewicht) {
+  if (!mqttClient.connected()) return;
+  StaticJsonDocument<256> doc;
+  doc["device"]    = CLIENT_ID;
+  doc["status"]    = "delete";
+  doc["gewicht_g"] = gewicht;
+  doc["uptime_s"]  = millis() / 1000;
+  char buf[256];
+  serializeJson(doc, buf);
+  bool ok = mqttClient.publish(TOPIC_PUB, buf);
+  Serial.printf("[DEL] delete: %.1f g Restgewicht – %s\n", gewicht, ok ? "OK" : "FEHLER");
+  showDisplay("Produkt geloescht", String(gewicht, 1) + "g Rest", "", "");
 }
 
 // ─── FH Aachen Chatbot: MHD-Schätzung (spielerisch) ──────
@@ -839,6 +864,57 @@ void loop() {
             outState = OUT_IDLE;
           } else {
             outState = OUT_WAIT_RETURN;
+          }
+        }
+        break;
+    }
+  }
+
+  // ─── Delete-Monitoring: Produkt komplett entfernen (GPIO27) ─
+  {
+    bool delBtn  = (digitalRead(DELETE_BTN_PIN) == LOW);
+    bool pressed = (delBtn && !prevDelBtn);
+    prevDelBtn   = delBtn;
+
+    bool  freshRead = false;
+    float curW      = 0.0;
+    if (delState == DEL_ARMED &&
+        waage.is_ready() && (now - delLastReadMs >= 500)) {
+      delLastReadMs = now;
+      curW          = waage.get_units(1);
+      freshRead     = true;
+    }
+
+    switch (delState) {
+      case DEL_IDLE:
+        if (pressed) {
+          delRefWeight  = waage.is_ready() ? waage.get_units(3) : 0.0;
+          delLastReadMs = now;
+          delState      = DEL_ARMED;
+          Serial.printf("[DEL] Loeschen aktiv – Ref: %.1f g\n", delRefWeight);
+          showDisplay("Loeschen aktiv", String(delRefWeight, 1) + "g Ref", "Produkt abnehmen", "");
+        }
+        break;
+
+      case DEL_ARMED:
+        if (freshRead && (delRefWeight - curW) > OUT_THRESHOLD_G) {
+          delSettleStart = now;
+          delState       = DEL_SETTLING;
+          Serial.printf("[DEL] Abnahme %.1f g – warte 2s\n", delRefWeight - curW);
+          showDisplay("Messe Loeschung", "Einpendeln...", "", "");
+        }
+        break;
+
+      case DEL_SETTLING:
+        if (now - delSettleStart >= OUT_SETTLE_MS) {
+          unsigned long t0 = millis();
+          while (!waage.is_ready() && millis() - t0 < 300) delay(5);
+          float settled = waage.is_ready() ? waage.get_units(5) : 0.0;
+          if ((delRefWeight - settled) > OUT_THRESHOLD_G) {
+            publishDelete(settled);
+            delState = DEL_IDLE;
+          } else {
+            delState = DEL_ARMED;
           }
         }
         break;
