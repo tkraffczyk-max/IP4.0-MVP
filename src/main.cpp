@@ -182,6 +182,7 @@ void publishTestMessage(const char* statusText);
 void showDisplay(const String& l1, const String& l2, const String& l3, const String& l4);
 void publishOutStatus(const char* status, float gewicht, const char* line2);
 void publishDelete(float gewicht);
+void triggerScanner();
 void fetchAndDisplay(const String& ean);
 void publishWithWeight(const String& ean, float measuredWeight = -1.0);
 void fetchMHD(const String& produktName, const String& categories);
@@ -240,6 +241,10 @@ float         delRefWeight    = 0.0;
 unsigned long delSettleStart  = 0;
 unsigned long delLastReadMs   = 0;
 bool          prevDelBtn      = HIGH;
+
+// ─── Einlegen-Knopf (GPIO26) ──────────────────────────────
+#define SCANNER_TRIG_BTN_PIN 26
+bool          prevTrigBtn     = HIGH;
 
 
 // ─── WLAN verbinden ────────────────────────────────────────
@@ -377,6 +382,32 @@ void publishDelete(float gewicht) {
   bool ok = mqttClient.publish(TOPIC_PUB, buf);
   Serial.printf("[DEL] delete: %.1f g Restgewicht – %s\n", gewicht, ok ? "OK" : "FEHLER");
   showDisplay("Produkt geloescht", String(gewicht, 1) + "g Rest", "", "");
+}
+
+// ─── Scanner per Serielbefehl auslösen ────────────────────
+void triggerScanner() {
+  // Command Trigger: 7E 00 08 01 00 02 01 AB CD
+  const uint8_t cmd[] = {0x7E, 0x00, 0x08, 0x01, 0x00, 0x02, 0x01, 0xAB, 0xCD};
+  Serial.print("[Scanner] Sende Bytes: ");
+  for (int i = 0; i < 9; i++) Serial.printf("%02X ", cmd[i]);
+  Serial.println();
+  size_t written = ScannerSerial.write(cmd, sizeof(cmd));
+  ScannerSerial.flush();
+  Serial.printf("[Scanner] %d Bytes gesendet\n", written);
+
+  // 7-Byte ACK verwerfen (02 00 00 01 00 33 31) – sonst landet es im Barcode-Buffer
+  unsigned long t0 = millis();
+  int gelesen = 0;
+  Serial.print("[Scanner] ACK empfangen: ");
+  while (gelesen < 7 && millis() - t0 < 500) {
+    if (ScannerSerial.available()) {
+      uint8_t b = ScannerSerial.read();
+      Serial.printf("%02X ", b);
+      gelesen++;
+    }
+  }
+  Serial.printf("(%d Bytes in %lums)\n", gelesen, millis() - t0);
+  showDisplay("Einlegen", "Bitte scannen...", "", "");
 }
 
 // ─── FH Aachen Chatbot: MHD-Schätzung (spielerisch) ──────
@@ -918,6 +949,17 @@ void loop() {
           }
         }
         break;
+    }
+  }
+
+  // ─── Einlegen-Knopf (GPIO32): Scanner auslösen ───────────
+  {
+    bool trigBtn = (digitalRead(SCANNER_TRIG_BTN_PIN) == LOW);
+    bool pressed = (trigBtn && !prevTrigBtn);
+    prevTrigBtn  = trigBtn;
+    if (pressed) {
+      Serial.println("[Einlegen] Knopf gedrückt – Scanner ausgeloest");
+      triggerScanner();
     }
   }
 
