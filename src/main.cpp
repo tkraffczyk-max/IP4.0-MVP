@@ -369,7 +369,7 @@ void fetchMHD(const String& produktName, const String& categories) {
                   "'. Antworte AUSSCHLIESSLICH mit einer einzigen ganzen Zahl"
                   " (die Anzahl der Tage). Kein Text, keine Einheit, nur die Zahl.";
 
-  StaticJsonDocument<1280> reqDoc;
+  DynamicJsonDocument reqDoc(1280);
   reqDoc["model"]       = CHATBOT_MODEL;
   reqDoc["max_tokens"]  = 500;
   reqDoc["temperature"] = 0.2;
@@ -399,7 +399,7 @@ void fetchMHD(const String& produktName, const String& categories) {
   http.end();
   Serial.print("[Chatbot] Response: "); Serial.println(raw);
 
-  StaticJsonDocument<2048> resDoc;
+  DynamicJsonDocument resDoc(2048);
   DeserializationError err = deserializeJson(resDoc, raw);
   if (err) {
     Serial.print("[Chatbot] JSON Fehler: "); Serial.println(err.c_str());
@@ -459,7 +459,7 @@ void fetchAndDisplay(const String& ean) {
 
   HTTPClient http;
   String url = "https://world.openfoodfacts.org/api/v0/product/" + ean
-             + ".json?fields=status,product_name,brands,categories,product_quantity,quantity_per_unit";
+             + ".json?fields=status,product_name,product_name_de,product_name_en,brands,categories,product_quantity,quantity_per_unit";
   http.begin(httpSecure, url);
   http.setTimeout(15000);
   http.addHeader("User-Agent", "ESP32-IoT-Scanner/1.0");
@@ -477,14 +477,17 @@ void fetchAndDisplay(const String& ean) {
   String raw = http.getString();
   http.end();
 
-  StaticJsonDocument<1024> doc;
+  DynamicJsonDocument doc(1024);
   if (deserializeJson(doc, raw) || doc["status"].as<int>() != 1) {
     Serial.println("[API] Produkt nicht gefunden");
     showDisplay("Nicht gefunden!", ean);
     return;
   }
 
-  storedName       = doc["product"]["product_name"] | "unbekannt";
+  storedName = doc["product"]["product_name"] | "";
+  if (storedName.isEmpty()) storedName = doc["product"]["product_name_de"] | "";
+  if (storedName.isEmpty()) storedName = doc["product"]["product_name_en"] | "";
+  if (storedName.isEmpty()) storedName = "unbekannt";
   storedBrands     = doc["product"]["brands"]       | "unbekannt";
   storedCategories = doc["product"]["categories"]   | "unbekannt";
   if (storedCategories.length() > 120) storedCategories = storedCategories.substring(0, 120);
@@ -530,14 +533,14 @@ void publishWithWeight(const String& ean) {
   const char* action = "in";
   float gewicht = waage.is_ready() ? waage.get_units(5) : 0.0;
 
-  StaticJsonDocument<1024> mqtt_doc;
+  DynamicJsonDocument mqtt_doc(1024);
   mqtt_doc["device"]           = CLIENT_ID;
   mqtt_doc["action"]           = action;
   mqtt_doc["ean"]              = ean;
   mqtt_doc["product_name"]     = storedName;
   mqtt_doc["brands"]           = storedBrands;
   mqtt_doc["categories"]       = storedCategories;
-  mqtt_doc["product_quantity"] = storedQuantity;
+  mqtt_doc["netto_g"]          = storedQuantity;
   mqtt_doc["mhd_schaetzung"]   = storedMHD;
   mqtt_doc["mhd_datum"]        = storedMHD_datum;
   mqtt_doc["gewicht_g"]        = gewicht;
