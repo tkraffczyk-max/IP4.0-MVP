@@ -902,7 +902,7 @@ void loop() {
             }
             showDisplay("Out_2",
                         String(settled, 1) + "g gesamt",
-                        String(outRefWeight - outAfterWeight, 1) + "g Netto", "");
+                        "", "");
             outState = OUT_IDLE;
           } else {
             outState = OUT_WAIT_RETURN;
