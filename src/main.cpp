@@ -825,6 +825,7 @@ void loop() {
     switch (outState) {
       case OUT_IDLE:
         if (pressed) {
+          { unsigned long t0 = millis(); while (!waage.is_ready() && millis() - t0 < 300) delay(5); }
           outRefWeight  = waage.is_ready() ? waage.get_units(3) : 0.0;
           outLastReadMs = now;
           outState      = OUT_ARMED;
@@ -919,6 +920,7 @@ void loop() {
     switch (delState) {
       case DEL_IDLE:
         if (pressed) {
+          { unsigned long t0 = millis(); while (!waage.is_ready() && millis() - t0 < 300) delay(5); }
           delRefWeight  = waage.is_ready() ? waage.get_units(3) : 0.0;
           delLastReadMs = now;
           delState      = DEL_ARMED;
