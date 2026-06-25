@@ -245,6 +245,9 @@ bool          prevDelBtn      = HIGH;
 // ─── Einlegen-Knopf (GPIO26) ──────────────────────────────
 #define SCANNER_TRIG_BTN_PIN 26
 bool          prevTrigBtn     = HIGH;
+bool          scannerActive   = false;
+unsigned long scanTriggerTime = 0;
+const long    SCAN_TIMEOUT_MS = 5000;
 
 
 // ─── WLAN verbinden ────────────────────────────────────────
@@ -756,9 +759,10 @@ void loop() {
     char c = (char)ScannerSerial.read();
     if (c == '\r' || c == '\n') {
       if (scanBuffer.length() > 0) {
-        pendingEAN   = scanBuffer;
-        scanBuffer   = "";
-        scanPending  = true;
+        pendingEAN    = scanBuffer;
+        scanBuffer    = "";
+        scanPending   = true;
+        scannerActive = false;
         productFetched = false;
         inRefWeight  = waage.is_ready() ? waage.get_units(3) : 0.0;
         inLastReadMs = millis();
@@ -968,7 +972,17 @@ void loop() {
     if (pressed) {
       Serial.println("[Einlegen] Knopf gedrückt – Scanner ausgeloest");
       triggerScanner();
+      scannerActive   = true;
+      scanTriggerTime = millis();
     }
+  }
+
+  // ─── Scan-Timeout: Abbruch nach 3s ohne EAN ───────────────
+  if (scannerActive && (now - scanTriggerTime >= SCAN_TIMEOUT_MS)) {
+    scannerActive = false;
+    scanBuffer    = "";
+    Serial.println("[Einlegen] Scan-Timeout – abgebrochen");
+    showDisplay("Scan abgebrochen", "Nochmal druecken", "", "");
   }
 
   // ─── Taster + Waage: Serial-Ausgabe alle 500 ms ───────────
