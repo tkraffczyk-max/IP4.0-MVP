@@ -213,7 +213,7 @@ bool          productFetched  = false;
 // ─── "Bereit"-Anzeige nach Publish ───────────────────────
 unsigned long readyTimerStart = 0;
 bool          readyPending    = false;
-const long    READY_DELAY_MS  = 5000;
+const long    READY_DELAY_MS  = 2000;
 
 // ─── In-Monitoring (Einlagerung per Gewichtszunahme) ──────
 enum InState { IN_IDLE, IN_WAIT_PLACE, IN_SETTLING_IN };
@@ -385,6 +385,8 @@ void publishDelete(float gewicht) {
   bool ok = mqttClient.publish(TOPIC_PUB, buf);
   Serial.printf("[DEL] delete: %.1f g Restgewicht – %s\n", gewicht, ok ? "OK" : "FEHLER");
   showDisplay("Produkt geloescht", String(gewicht, 1) + "g Rest", "", "");
+  readyTimerStart = millis();
+  readyPending    = true;
 }
 
 // ─── Scanner per Serielbefehl auslösen ────────────────────
@@ -850,6 +852,8 @@ void loop() {
           outState = OUT_IDLE;
           Serial.println("[OUT] Abbruch: Gewichtszunahme im Entnahmezyklus");
           showDisplay("Entnahme", "abgebrochen", "", "");
+          readyTimerStart = millis();
+          readyPending    = true;
         }
         break;
 
@@ -903,6 +907,8 @@ void loop() {
             showDisplay("Out_2",
                         String(settled, 1) + "g gesamt",
                         "", "");
+            readyTimerStart = millis();
+            readyPending    = true;
             outState = OUT_IDLE;
           } else {
             outState = OUT_WAIT_RETURN;
@@ -983,6 +989,8 @@ void loop() {
     scanBuffer    = "";
     Serial.println("[Einlegen] Scan-Timeout – abgebrochen");
     showDisplay("Scan abgebrochen", "Nochmal druecken", "", "");
+    readyTimerStart = millis();
+    readyPending    = true;
   }
 
   // ─── Taster + Waage: Serial-Ausgabe alle 500 ms ───────────
