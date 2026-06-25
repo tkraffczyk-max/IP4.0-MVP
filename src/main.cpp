@@ -836,10 +836,16 @@ void loop() {
 
       case OUT_ARMED:
         if (freshRead && (outRefWeight - curW) > OUT_THRESHOLD_G) {
+          // Gewicht gesunken → Produkt entnommen
           outSettleStart = now;
           outState       = OUT_SETTLING_1;
           Serial.printf("[OUT] Abnahme %.1f g – warte 2s\n", outRefWeight - curW);
           showDisplay("Messe Entnahme", "Einpendeln...", "", "");
+        } else if (freshRead && (curW - outRefWeight) > OUT_THRESHOLD_G) {
+          // Gewicht gestiegen → falsches Drücken, Zyklus abbrechen
+          outState = OUT_IDLE;
+          Serial.println("[OUT] Abbruch: Gewichtszunahme im Entnahmezyklus");
+          showDisplay("Entnahme", "abgebrochen", "", "");
         }
         break;
 
